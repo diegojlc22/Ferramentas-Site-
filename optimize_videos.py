@@ -49,6 +49,7 @@ class VideoOptimizerApp(ctk.CTk):
 
         # Variáveis de Controle
         self.folder_path = tk.StringVar()
+        self.output_path_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="Rápido")
         self.is_running = False
         self.stop_event = threading.Event()
@@ -77,14 +78,35 @@ class VideoOptimizerApp(ctk.CTk):
         self.frame_config = ctk.CTkFrame(self)
         self.frame_config.pack(pady=10, padx=20, fill="x")
 
-        self.lbl_mode = ctk.CTkLabel(self.frame_config, text="Modo de Otimização:")
-        self.lbl_mode.grid(row=0, column=0, padx=10, pady=10)
+        # Seleção de Pasta de Saída
+        self.btn_output = ctk.CTkButton(self.frame_config, text="📂 Pasta de Saída (Opcional)", command=self.select_output_folder, fg_color="gray")
+        self.btn_output.grid(row=0, column=0, padx=10, pady=5)
+        self.lbl_output = ctk.CTkLabel(self.frame_config, text="Padrão: Subpasta 'Otimizados_Web'", text_color="gray", font=("Arial", 10))
+        self.lbl_output.grid(row=1, column=0, padx=10, pady=0)
 
-        self.combo_mode = ctk.CTkComboBox(self.frame_config, values=["Rápido (Copiar Vídeo, Converter Áudio)", "Perfeito (Recodificar Tudo)"], variable=self.mode_var, width=300)
-        self.combo_mode.grid(row=0, column=1, padx=10, pady=10)
+        # Nome da Pasta Remota (Upload)
+        self.lbl_remote = ctk.CTkLabel(self.frame_config, text="Pasta no Site (Upload):")
+        self.lbl_remote.grid(row=0, column=1, padx=5, pady=5, sticky="e")
+        
+        self.entry_remote_folder = ctk.CTkEntry(self.frame_config, width=150)
+        self.entry_remote_folder.grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        self.entry_remote_folder.insert(0, "Filmes")
+
+        self.btn_scan = ctk.CTkButton(self.frame_config, text="🔍 Scan Pastas", command=self.open_scan_dialog, width=100, fg_color="purple")
+        self.btn_scan.grid(row=0, column=3, padx=5, pady=5)
+
+        self.lbl_mode = ctk.CTkLabel(self.frame_config, text="Modo de Otimização:")
+        self.lbl_mode.grid(row=2, column=0, padx=10, pady=10)
+
+        self.combo_mode = ctk.CTkComboBox(self.frame_config, values=[
+            "Rápido (Copiar Vídeo, Converter Áudio)", 
+            "Perfeito (CPU - Libx264 - Lento)",
+            "Perfeito (GPU Intel - QuickSync - Rápido)"
+        ], variable=self.mode_var, width=300)
+        self.combo_mode.grid(row=2, column=1, columnspan=2, padx=10, pady=10)
 
         self.btn_start = ctk.CTkButton(self.frame_config, text="🚀 INICIAR PROCESSAMENTO", command=self.buffer_start_process, fg_color="green", height=40)
-        self.btn_start.grid(row=0, column=2, padx=10, pady=10)
+        self.btn_start.grid(row=3, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
 
         # 3. Progresso
         self.frame_progress = ctk.CTkFrame(self)
@@ -146,9 +168,77 @@ class VideoOptimizerApp(ctk.CTk):
             self.folder_path.set(folder)
             self.log(f"📂 Pasta selecionada: {folder}")
 
+    def select_output_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.output_path_var.set(folder)
+            self.lbl_output.configure(text=f"Saída: {folder}", text_color="white")
+            self.log(f"📂 Pasta de Saída definida: {folder}")
+
+    def open_scan_dialog(self):
+        self.log("🔍 Iniciando Scan de pastas remotas...")
+        threading.Thread(target=self.fetch_folders_thread, daemon=True).start()
+
+    def fetch_folders_thread(self):
+        # DoodStream
+        dood_folders = []
+        try:
+            r = requests.get(f"https://doodapi.com/api/folder/list?key={DOODSTREAM_KEY}").json()
+            if r['msg'] == 'OK':
+                dood_folders = [f['name'] for f in r['result']['folders']]
+        except: pass
+
+        # Abyss
+        abyss_folders = []
+        try:
+            r = requests.get(f"https://api.abyss.to/v1/folders/list?key={ABYSS_KEY}&maxResults=100").json()
+            if 'items' in r:
+                abyss_folders = [f['name'] for f in r['items']]
+        except: pass
+
+        # StreamTape (Listagem limitada, tenta pegar da raiz)
+        st_folders = []
+        try:
+            r = requests.get(f"https://api.streamtape.com/file/listfolder?login={STREAMTAPE_LOGIN}&key={STREAMTAPE_KEY}").json()
+            if r['status'] == 200:
+                folders = r.get('result', {}).get('folders', [])
+                if isinstance(folders, list):
+                   st_folders = [f['name'] for f in folders]
+        except: pass
+
+        # Consolidar nomes únicos
+        all_folders = sorted(list(set(dood_folders + abyss_folders + st_folders)))
+        self.after(0, lambda: self.show_folder_selection(all_folders))
+
+    def show_folder_selection(self, folders):
+        if not folders:
+            self.log("⚠️ Nenhuma pasta encontrada nos sites.")
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Selecionar Pasta Remota")
+        dialog.geometry("400x400")
+        
+        lbl = ctk.CTkLabel(dialog, text="Pastas Encontradas (Clique para usar):", font=("Roboto", 14, "bold"))
+        lbl.pack(pady=10)
+
+        scroll = ctk.CTkScrollableFrame(dialog, width=350, height=300)
+        scroll.pack(pady=5, padx=10)
+
+        def select(name):
+            self.entry_remote_folder.delete(0, tk.END)
+            self.entry_remote_folder.insert(0, name)
+            self.log(f"✅ Pasta '{name}' selecionada para upload.")
+            dialog.destroy()
+
+        for f in folders:
+            btn = ctk.CTkButton(scroll, text=f, command=lambda n=f: select(n), fg_color="darkblue")
+            btn.pack(pady=2, fill="x")
+
     def check_dependencies(self):
         if not os.path.exists(FFMPEG_EXE) or not os.path.exists(FFPROBE_EXE):
-            self.log("⚠️ FFmpeg não encontrado. Baixando automaticamente...")
+            self.log("⚠️ FFmpeg não encontrado. Baixando automaticamente... (Aguarde para Iniciar)")
+            self.btn_start.configure(state="disabled", text="Baixando Dependências...")
             threading.Thread(target=self.download_ffmpeg_thread).start()
         else:
             self.log("✅ FFmpeg encontrado.")
@@ -166,8 +256,11 @@ class VideoOptimizerApp(ctk.CTk):
                             shutil.copyfileobj(source, target)
             os.remove("ffmpeg.zip")
             self.log("✅ FFmpeg baixado e instalado com sucesso!")
+            # Reabilitar botão na UI principal
+            self.after(0, lambda: self.btn_start.configure(state="normal", text="🚀 INICIAR PROCESSAMENTO"))
         except Exception as e:
             self.log(f"❌ Erro ao baixar FFmpeg: {e}")
+            self.after(0, lambda: self.btn_start.configure(text="Erro no Download (Baixe Manualmente)"))
 
     # ------------------------------------------------------------------
     # LÓGICA PRINCIPAL (THREAD)
@@ -192,9 +285,48 @@ class VideoOptimizerApp(ctk.CTk):
         # Inicia a thread pesada
         threading.Thread(target=self.run_process, daemon=True).start()
 
+        # Variáveis de Controle
+        self.folder_path = tk.StringVar()
+        self.output_path_var = tk.StringVar() # Nova variável
+        self.mode_var = tk.StringVar(value="Rápido")
+        self.is_running = False
+        self.stop_event = threading.Event()
+
+        # Layout
+        self.create_widgets()
+        
+        # Verificar dependências ao iniciar
+        self.check_dependencies()
+
+    def create_widgets(self):
+        # ... (rest of create_widgets is handled by previous replace call, we focus on init here mostly but wait, replace needs contiguous block. I will split this into 2 calls if needed or encompass just the init part.
+        # Actually, let's just add the select_output_folder method and update run_process. The init var can be added implicitly or I'll add it now.)
+        pass 
+
+    # (I will do the init change in a separate call to be safe or include it if range allows. 
+    # The previous replace changed create_widgets. Now I need to add select_output_folder and update run_process.
+    # Let's do select_output_folder first.)
+
+    def select_output_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.output_path_var.set(folder)
+            self.lbl_output.configure(text=f"Saída: {folder}", text_color="white")
+            self.log(f"📂 Pasta de Saída definida: {folder}")
+
+    # ... check_dependencies ...
+
+    # ... run_process ...
     def run_process(self):
         try:
             folder = self.folder_path.get()
+            # Pega o nome da pasta remota da Interface
+            remote_folder_name = self.entry_remote_folder.get().strip() or "Filmes"
+            
+            # Atualiza a global apenas para referência, mas vamos passar como argumento
+            global FOLDER_NAME 
+            FOLDER_NAME = remote_folder_name
+
             reencode_mode = "Perfeito" in self.mode_var.get()
             
             extensions = ['*.mp4', '*.mkv', '*.avi', '*.mov']
@@ -209,8 +341,14 @@ class VideoOptimizerApp(ctk.CTk):
                 return
 
             self.log(f"🚀 Iniciando processamento de {total_files} vídeos...")
+            self.log(f"☁️ Pasta Remota (Upload): {FOLDER_NAME}")
             
-            output_folder = os.path.join(folder, "Otimizados_Web")
+            # Define pasta de saída
+            if self.output_path_var.get():
+                output_folder = self.output_path_var.get()
+            else:
+                output_folder = os.path.join(folder, "Otimizados_Web")
+            
             os.makedirs(output_folder, exist_ok=True)
 
             for i, video in enumerate(files):
@@ -288,38 +426,75 @@ class VideoOptimizerApp(ctk.CTk):
             duration = 1 # Evitar div por zero
 
         # Comando
-        cmd = [FFMPEG_EXE, '-y', '-i', input_path, '-map', '0:v:0', '-map', '0:a:0']
-        if reencode:
-            cmd.extend(['-c:v', 'libx264', '-preset', 'fast', '-crf', '24', '-maxrate', '2500k', '-bufsize', '5000k', '-c:a', 'aac', '-b:a', '128k', '-ac', '2'])
-        else:
+        cmd = [FFMPEG_EXE, '-y', '-i', input_path]
+        
+        # Mapeamento
+        cmd.extend(['-map', '0:v:0', '-map', '0:a:0'])
+
+        mode = self.mode_var.get()
+
+        if "Rápido (Copiar" in mode:
+            # Modo Copy
             cmd.extend(['-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ac', '2'])
+        
+        elif "GPU Intel" in mode:
+            # Modo Intel QuickSync (Hardware)
+            # Requer h264_qsv. 
+            # Ajustes: global_quality (ICQ) ou bitrate fixo. Vamos usar bitrate max para web.
+            cmd.extend([
+                '-c:v', 'h264_qsv', 
+                '-preset', 'veryfast', 
+                '-global_quality', '24', # Similar a CRF
+                '-maxrate', '2500k', 
+                '-bufsize', '5000k',
+                '-c:a', 'aac', '-b:a', '128k', '-ac', '2'
+            ])
+            
+        else:
+            # Modo CPU (Original Perfeito)
+            cmd.extend([
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '24', 
+                '-maxrate', '2500k', '-bufsize', '5000k',
+                '-c:a', 'aac', '-b:a', '128k', '-ac', '2'
+            ])
         
         cmd.extend(['-movflags', '+faststart', output_path])
 
         # Execução com leitura de progresso
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0)
+        creation_flags = 0
+        # Execução com leitura de progresso
+        creation_flags = 0
+        if sys.platform == 'win32':
+             creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True, creationflags=creation_flags)
         
         start_time = time.time()
         time_pattern = re.compile(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})')
 
-        for line in process.stderr:
-            if self.stop_event.is_set():
-                process.terminate()
-                return False
+        stderr_stream = process.stderr
+        if stderr_stream is None:
+            self.log("❌ Erro interno: Não foi possível capturar a saída do processo de conversão.")
+            return False
+
+        for line in stderr_stream:
+                if self.stop_event.is_set():
+                    process.terminate()
+                    return False
                 
-            match = time_pattern.search(line)
-            if match:
-                h, m, s = map(float, match.groups())
-                current_acc = h*3600 + m*60 + s
-                progress = min(current_acc / duration, 1.0)
-                
-                elapsed = time.time() - start_time
-                if progress > 0.01:
-                    eta_seconds = (elapsed / progress) - elapsed
-                    eta_str = str(timedelta(seconds=int(eta_seconds)))
-                    # Throttle update
-                    if int(elapsed * 10) % 2 == 0:
-                        self.update_status(f"Convertendo... ({int(progress*100)}%)", progress, eta_str)
+                match = time_pattern.search(line)
+                if match:
+                    h, m, s = map(float, match.groups())
+                    current_acc = h*3600 + m*60 + s
+                    progress = min(current_acc / duration, 1.0)
+                    
+                    elapsed = time.time() - start_time
+                    if progress > 0.01:
+                        eta_seconds = (elapsed / progress) - elapsed
+                        eta_str = str(timedelta(seconds=int(eta_seconds)))
+                        # Throttle update
+                        if int(elapsed * 10) % 2 == 0:
+                            self.update_status(f"Convertendo... ({int(progress*100)}%)", progress, eta_str)
 
         process.wait()
         return process.returncode == 0
@@ -391,9 +566,10 @@ class VideoOptimizerApp(ctk.CTk):
 
             upload_url = server['result']
             
+            filename = os.path.basename(file_path)
             fields = {
                 'api_key': DOODSTREAM_KEY,
-                'file': ('video.mp4', open(file_path, 'rb'), 'video/mp4')
+                'file': (filename, open(file_path, 'rb'), 'video/mp4')
             }
             if folder_id:
                 fields['fld_id'] = folder_id
@@ -452,8 +628,9 @@ class VideoOptimizerApp(ctk.CTk):
 
             upload_target = server_resp['result']['url']
             
+            filename = os.path.basename(file_path)
             fields = {
-                'file': ('video.mp4', open(file_path, 'rb'), 'video/mp4')
+                'file': (filename, open(file_path, 'rb'), 'video/mp4')
             }
             
             resp = self.upload_file_generic(file_path, upload_target, fields, "StreamTape")
@@ -514,9 +691,14 @@ class VideoOptimizerApp(ctk.CTk):
                 # 2. Mover para Pasta
                 folder_id = self.get_abyss_folder()
                 if folder_id:
-                    move_url = f"https://api.abyss.to/v1/files/{file_id}?parentId={folder_id}&key={ABYSS_KEY}"
-                    requests.patch(move_url) 
-                    self.log(f"      📂 Movido para pasta '{FOLDER_NAME}'")
+                    # Correção: Enviar parentId no corpo JSON
+                    move_url = f"https://api.abyss.to/v1/files/{file_id}?key={ABYSS_KEY}"
+                    resp_move = requests.patch(move_url, json={'parentId': folder_id})
+                    
+                    if resp_move.status_code == 200:
+                        self.log(f"      📂 Movido para pasta '{FOLDER_NAME}'")
+                    else:
+                         self.log(f"      ⚠️ Erro ao mover Abyss: {resp_move.text}")
             else:
                 self.log(f"      ❌ Falha Abyss: {resp}")
 
