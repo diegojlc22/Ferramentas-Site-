@@ -15,13 +15,31 @@ import tkinter as tk
 from tkinter import filedialog
 import customtkinter as ctk
 import requests
+import asyncio
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
+
+# Tenta importar Pyrogram no início para evitar travamento de Thread
+try:
+    from pyrogram import Client
+    PYROGRAM_AVAILABLE = True
+except ImportError:
+    PYROGRAM_AVAILABLE = False
+    print("AVISO: Pyrogram não instalado via pip install pyrogram tgcrypto")
+
+try:
+    import tgcrypto
+    TGCRYPTO_AVAILABLE = True
+except ImportError:
+    TGCRYPTO_AVAILABLE = False
 
 # ==================================================================================
 # CONFIGURAÇÕES
 # ==================================================================================
 
 # Chaves de API
+API_ID = 25946794
+API_HASH = "c13ab5fe029cb271522873732cfac4e6"
+
 DOODSTREAM_KEY = "556260hzehzrz5kh6crwvz"
 STREAMTAPE_LOGIN = "6f4fcf8d0f2f9b1fefe0"   
 STREAMTAPE_KEY = "vDQxaexXbOC4pml"
@@ -47,18 +65,33 @@ class VideoOptimizerApp(ctk.CTk):
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
+        # Variáveis de Configuração Persistente
+        self.config_file = "config.json"
+        
         # Variáveis de Controle
         self.folder_path = tk.StringVar()
         self.output_path_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="Rápido")
+        self.remote_folder_var = tk.StringVar(value="Filmes")
+        
+        # Novas Opções
+        self.turbo_var = ctk.BooleanVar(value=False)
+        self.sites_var = ctk.BooleanVar(value=True) 
+        self.telegram_var = ctk.BooleanVar(value=False)
+        self.telegram_token = tk.StringVar()
+        self.telegram_chat = tk.StringVar()
+
         self.is_running = False
         self.stop_event = threading.Event()
+
+        # Carregar Configurações Salvas
+        self.load_config()
 
         # Layout
         self.create_widgets()
         
-        # Verificar dependências ao iniciar
-        self.check_dependencies()
+        # Verificar dependências após carregar UI (segurança da UI)
+        self.after(500, self.check_dependencies)
 
     def create_widgets(self):
         # 1. Título e Seleção de Pasta
@@ -101,12 +134,38 @@ class VideoOptimizerApp(ctk.CTk):
         self.combo_mode = ctk.CTkComboBox(self.frame_config, values=[
             "Rápido (Copiar Vídeo, Converter Áudio)", 
             "Perfeito (CPU - Libx264 - Lento)",
-            "Perfeito (GPU Intel - QuickSync - Rápido)"
+            "Perfeito (GPU Intel - QuickSync - Rápido)",
+            "Apenas Upload (Sem Converter)"
         ], variable=self.mode_var, width=300)
         self.combo_mode.grid(row=2, column=1, columnspan=2, padx=10, pady=10)
 
+        # Opções Extras (Turbo e Telegram)
+        self.frame_options = ctk.CTkFrame(self.frame_config, fg_color="transparent")
+        self.frame_options.grid(row=3, column=0, columnspan=4, pady=10, sticky="ew")
+        
+        self.chk_turbo = ctk.CTkSwitch(self.frame_options, text="⚡ Modo Turbo", variable=self.turbo_var)
+        self.chk_turbo.pack(side="left", padx=10)
+
+        self.chk_sites = ctk.CTkSwitch(self.frame_options, text="🌐 Enviar Sites", variable=self.sites_var)
+        self.chk_sites.pack(side="left", padx=10)
+
+        self.chk_telegram = ctk.CTkSwitch(self.frame_options, text="✈️ Telegram", variable=self.telegram_var, command=self.toggle_telegram_fields)
+        self.chk_telegram.pack(side="left", padx=10)
+
+        # Campos Telegram (Inicialmente ocultos ou visíveis dependendo do estado)
+        self.frame_telegram = ctk.CTkFrame(self.frame_config)
+        
+        self.entry_tg_token = ctk.CTkEntry(self.frame_telegram, textvariable=self.telegram_token, placeholder_text="Bot Token", width=200)
+        self.entry_tg_token.pack(side="left", padx=5)
+        
+        self.entry_tg_chat = ctk.CTkEntry(self.frame_telegram, textvariable=self.telegram_chat, placeholder_text="Chat ID", width=100)
+        self.entry_tg_chat.pack(side="left", padx=5)
+        
+        if self.telegram_var.get():
+             self.frame_telegram.grid(row=4, column=0, columnspan=4, pady=5)
+
         self.btn_start = ctk.CTkButton(self.frame_config, text="🚀 INICIAR PROCESSAMENTO", command=self.buffer_start_process, fg_color="green", height=40)
-        self.btn_start.grid(row=3, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
+        self.btn_start.grid(row=5, column=0, columnspan=4, padx=10, pady=10, sticky="ew")
 
         # 3. Progresso
         self.frame_progress = ctk.CTkFrame(self)
@@ -149,8 +208,14 @@ class VideoOptimizerApp(ctk.CTk):
         self.after(0, lambda: self._log_internal(message))
 
     def _log_internal(self, message):
-        self.txt_log.insert("end", message + "\n")
-        self.txt_log.see("end")
+        try:
+             if hasattr(self, 'txt_log') and self.txt_log:
+                self.txt_log.insert("end", message + "\n")
+                self.txt_log.see("end")
+             else:
+                print(f"[LOG]: {message}")
+        except Exception as e:
+             print(f"[LOG ERROR]: {message} | {e}")
 
     def update_status(self, task_name, progress=0.0, eta_text=""):
         """Atualiza barra de progresso e texto da tarefa atual."""
@@ -174,6 +239,45 @@ class VideoOptimizerApp(ctk.CTk):
             self.output_path_var.set(folder)
             self.lbl_output.configure(text=f"Saída: {folder}", text_color="white")
             self.log(f"📂 Pasta de Saída definida: {folder}")
+
+    def toggle_telegram_fields(self):
+        if self.telegram_var.get():
+            self.frame_telegram.grid(row=4, column=0, columnspan=4, pady=5)
+        else:
+            self.frame_telegram.grid_forget()
+
+    def load_config(self):
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    data = json.load(f)
+                    self.folder_path.set(data.get('folder_path', ''))
+                    self.output_path_var.set(data.get('output_path', ''))
+                    self.remote_folder_var.set(data.get('remote_folder', 'Filmes'))
+                    self.remote_folder_var.set(data.get('remote_folder', 'Filmes'))
+                    self.remote_folder_var.set(data.get('remote_folder', 'Filmes'))
+                    self.turbo_var.set(data.get('turbo_mode', False))
+                    self.sites_var.set(data.get('sites_enabled', True))
+                    self.telegram_var.set(data.get('telegram_enabled', False))
+                    self.telegram_token.set(data.get('telegram_token', ''))
+                    self.telegram_chat.set(data.get('telegram_chat', ''))
+        except: pass
+
+    def save_config(self):
+        data = {
+            'folder_path': self.folder_path.get(),
+            'output_path': self.output_path_var.get(),
+            'remote_folder': self.entry_remote_folder.get(),
+            'turbo_mode': self.turbo_var.get(),
+            'sites_enabled': self.sites_var.get(),
+            'telegram_enabled': self.telegram_var.get(),
+            'telegram_token': self.telegram_token.get(),
+            'telegram_chat': self.telegram_chat.get()
+        }
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(data, f)
+        except: pass
 
     def open_scan_dialog(self):
         self.log("🔍 Iniciando Scan de pastas remotas...")
@@ -267,6 +371,8 @@ class VideoOptimizerApp(ctk.CTk):
     # ------------------------------------------------------------------
 
     def buffer_start_process(self):
+        print("DEBUG: Botão Iniciar Clicado") # Console
+        self.log("🖱️ Botão Iniciar Pressionado...")
         if self.is_running:
             self.log("Solicitando parada... Aguarde finalizar tarefa atual.")
             self.stop_event.set()
@@ -274,65 +380,66 @@ class VideoOptimizerApp(ctk.CTk):
             self.start_thread()
 
     def start_thread(self):
-        if not self.folder_path.get():
+        folder = self.folder_path.get()
+        print(f"DEBUG: Pasta selecionada: {folder}")
+        
+        if not folder:
             self.log("❌ Selecione uma pasta primeiro!")
             return
+
+        if self.telegram_var.get():
+            token = self.telegram_token.get()
+            chat = self.telegram_chat.get()
+            
+            if not token or not chat:
+                self.log("❌ Erro: Para enviar ao Telegram, preencha o Token e o Chat ID!")
+                return
 
         self.is_running = True
         self.btn_start.configure(text="🛑 PARAR (Aguarde o fim da tarefa atual)", fg_color="red")
         self.stop_event.clear()
         
-        # Inicia a thread pesada
-        threading.Thread(target=self.run_process, daemon=True).start()
-
-        # Variáveis de Controle
-        self.folder_path = tk.StringVar()
-        self.output_path_var = tk.StringVar() # Nova variável
-        self.mode_var = tk.StringVar(value="Rápido")
-        self.is_running = False
-        self.stop_event = threading.Event()
-
-        # Layout
-        self.create_widgets()
+        self.log("🚀 Iniciando Thread de Processamento...")
         
-        # Verificar dependências ao iniciar
-        self.check_dependencies()
+        # Leitura SEGURA de todas as variáveis na Main Thread
+        config = {
+            'folder': folder,
+            'remote_folder_name': self.entry_remote_folder.get().strip() or "Filmes",
+            'output_folder_custom': self.output_path_var.get(),
+            'mode': self.mode_var.get(),
+            'turbo': self.turbo_var.get(),
+            'sites_enabled': self.sites_var.get(),
+            'telegram_enabled': self.telegram_var.get(),
+            'telegram_token': self.telegram_token.get(),
+            'telegram_chat': self.telegram_chat.get()
+        }
+        self.save_config()
 
-    def create_widgets(self):
-        # ... (rest of create_widgets is handled by previous replace call, we focus on init here mostly but wait, replace needs contiguous block. I will split this into 2 calls if needed or encompass just the init part.
-        # Actually, let's just add the select_output_folder method and update run_process. The init var can be added implicitly or I'll add it now.)
-        pass 
+        # Inicia a thread pesada passando o dicionário de configuração
+        threading.Thread(target=self.run_process, args=(config,), daemon=True).start()
 
-    # (I will do the init change in a separate call to be safe or include it if range allows. 
-    # The previous replace changed create_widgets. Now I need to add select_output_folder and update run_process.
-    # Let's do select_output_folder first.)
 
-    def select_output_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.output_path_var.set(folder)
-            self.lbl_output.configure(text=f"Saída: {folder}", text_color="white")
-            self.log(f"📂 Pasta de Saída definida: {folder}")
-
-    # ... check_dependencies ...
-
-    # ... run_process ...
-    def run_process(self):
+    def run_process(self, config):
+        print("DEBUG: Thread run_process iniciou (Config OK).")
         try:
-            folder = self.folder_path.get()
-            # Pega o nome da pasta remota da Interface
-            remote_folder_name = self.entry_remote_folder.get().strip() or "Filmes"
+            folder = config['folder']
+            remote_folder_name = config['remote_folder_name']
             
-            # Atualiza a global apenas para referência, mas vamos passar como argumento
+            # Atualiza a global apenas para referência
             global FOLDER_NAME 
             FOLDER_NAME = remote_folder_name
 
-            reencode_mode = "Perfeito" in self.mode_var.get()
+            reencode_mode = "Perfeito" in config['mode']
             
             extensions = ['*.mp4', '*.mkv', '*.avi', '*.mov']
             files = []
+            print(f"DEBUG: Procurando vídeos em: {folder}")
             for ext in extensions:
-                files.extend(list(Path(folder).glob(ext)))
+                found = list(Path(folder).glob(ext))
+                print(f"DEBUG: Buscando {ext} -> Encontrados: {len(found)}")
+                files.extend(found)
+            
+            print(f"DEBUG: Total arquivos encontrados: {len(files)}")
             
             total_files = len(files)
             if total_files == 0:
@@ -340,18 +447,25 @@ class VideoOptimizerApp(ctk.CTk):
                 self.finish_process()
                 return
 
+            print("DEBUG: Checkpoint 1 - Iniciando Logs")
             self.log(f"🚀 Iniciando processamento de {total_files} vídeos...")
             self.log(f"☁️ Pasta Remota (Upload): {FOLDER_NAME}")
+            print("DEBUG: Checkpoint 2 - Logs Feitos")
             
             # Define pasta de saída
-            if self.output_path_var.get():
-                output_folder = self.output_path_var.get()
+            if config['output_folder_custom']:
+                # Se o usuário escolheu uma pasta, USA ELA DIRETO (sem subpasta)
+                output_folder = config['output_folder_custom']
             else:
+                # Se não escolheu, cria a subpasta padrão na origem
                 output_folder = os.path.join(folder, "Otimizados_Web")
             
+            print(f"DEBUG: Checkpoint 3 - Criando pasta {output_folder}")
             os.makedirs(output_folder, exist_ok=True)
+            print("DEBUG: Checkpoint 4 - Pasta OK")
 
             for i, video in enumerate(files):
+                print(f"DEBUG: Loop Arquivo {i+1}: {video.name}")
                 if self.stop_event.is_set():
                     self.log("🛑 Processo interrompido pelo usuário.")
                     break
@@ -364,29 +478,70 @@ class VideoOptimizerApp(ctk.CTk):
                 dest_name = video.stem + ".mp4"
                 output_path = os.path.join(output_folder, dest_name)
                 
+                print(f"DEBUG: Processando {video.name}")
+                print(f"DEBUG: Modo selecionado: '{config['mode']}'")
+
                 self.log(f"\n🎬 [{i+1}/{total_files}] Processando: {video.name}")
 
                 # 1. CONVERSÃO
                 success = True
-                if os.path.exists(output_path):
-                    self.log("   ⚠️ Arquivo otimizado já existe. Pulando conversão.")
+                if "Apenas Upload" in config['mode']:
+                     self.log("   ⏩ Pulando conversão (Modo Apenas Upload).")
+                     if not os.path.exists(output_path) and os.path.exists(video_path):
+                         # output vira source original
+                         output_path = video_path 
                 else:
-                    success = self.convert_video(video_path, output_path, reencode_mode)
+                    if os.path.exists(output_path):
+                        self.log("   ⚠️ Arquivo otimizado já existe. Pulando conversão.")
+                    else:
+                        success = self.convert_video(video_path, output_path, reencode_mode)
+                    
+                    if not success:
+                        self.log("   ❌ Falha na conversão ou cancelado. Pulando uploads.")
+                        continue
+
+                if self.stop_event.is_set(): break
+
+                # 2. UPLOADS
+                upload_funcs = []
                 
-                if not success:
-                    self.log("   ❌ Falha na conversão ou cancelado. Pulando uploads.")
+                print(f"DEBUG: Config Telegram Enabled: {config['telegram_enabled']}")
+
+                if config['sites_enabled']:
+                    upload_funcs.extend([self.upload_doodstream, self.upload_streamtape, self.upload_abyss])
+                
+                if config['telegram_enabled']:
+                     print("DEBUG: Adicionando funcao de upload Telegram")
+                     # Usa lambda para passar os tokens seguros
+                     upload_funcs.append(lambda p: self.upload_telegram(p, config['telegram_token'], config['telegram_chat']))
+
+                if not upload_funcs:
+                    self.log("   ⚠️ Nenhuma opção de upload selecionada.")
                     continue
 
-                if self.stop_event.is_set(): break
-
-                # 2. UPLOADS (Sequencial: Um por um)
-                self.upload_doodstream(output_path)
-                if self.stop_event.is_set(): break
-                
-                self.upload_streamtape(output_path)
-                if self.stop_event.is_set(): break
-                
-                self.upload_abyss(output_path)
+                if config['turbo']:
+                    self.log("   ⚡ Modo Turbo: Iniciando uploads simultâneos...")
+                    threads = []
+                    for func in upload_funcs:
+                        t = threading.Thread(target=func, args=(output_path,))
+                        t.start()
+                        threads.append(t)
+                    
+                    # Aguardar todos terminarem
+                    for t in threads:
+                        t.join()
+                else:
+                    # Sequencial
+                    for func in upload_funcs:
+                         if self.stop_event.is_set(): break
+                         if self.stop_event.is_set(): break
+                         print(f"DEBUG: Executando upload index {upload_funcs.index(func)}")
+                         try:
+                             func(output_path)
+                             print(f"DEBUG: Upload index {upload_funcs.index(func)} CONCLUIDO")
+                         except Exception as e_up:
+                             print(f"DEBUG: Erro ao executar upload: {e_up}")
+                             self.log(f"❌ Erro ao chamar função de upload: {e_up}")
                 
                 self.log(f"   ✅ Arquivo {video.name} finalizado!")
 
@@ -705,6 +860,119 @@ class VideoOptimizerApp(ctk.CTk):
         except Exception as e:
             self.log(f"      ❌ Erro Abyss: {e}")
 
+    
+    
+    def upload_telegram(self, file_path, token, chat_id):
+        # Correção ID
+        if len(str(chat_id)) >= 12 and not str(chat_id).startswith("-"):
+            chat_id = int(f"-{chat_id}")
+        else:
+            try: chat_id = int(chat_id)
+            except: pass
+
+        self.log(f"   📤 Iniciando Telegram (MTProto 2GB)...")
+
+        if not PYROGRAM_AVAILABLE:
+            self.log("❌ ERRO: Biblioteca 'pyrogram' não instalada!")
+            return
+
+        # Execução Async Manual - Cria e fecha loop a cada arquivo para evitar conflitos em Threads
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._upload_telegram_async(file_path, token, chat_id))
+            loop.close()
+        except RuntimeError as re:
+                self.log(f"      ❌ Erro Loop Async: {re} (Tente reiniciar o app)")
+        except Exception as e:
+                self.log(f"      ❌ Erro Crítico Telegram: {e}")
+
+    async def _upload_telegram_async(self, file_path, token, chat_id):
+        app = None
+        try:
+            session_name = os.path.join(os.getcwd(), "my_bot_session")
+            # Iniciar Client SEMPRE dentro do loop async e usando Client diretamente
+            # Otimização: workdir separado e ipv6 desativado por precaução
+            # Aumentando para 8 workers para tentar uso max de banda
+            workers_count = 8 if TGCRYPTO_AVAILABLE else 4 
+            # ipv6=False é CRUCIAL para evitar lentidao em algumas rotas
+            app = Client(session_name, api_id=API_ID, api_hash=API_HASH, bot_token=token, workers=workers_count, max_concurrent_transmissions=workers_count, ipv6=False)
+
+            await app.start()
+            tg_status = "✅ ULTRA RÁPIDO (TgCrypto Ativo)" if TGCRYPTO_AVAILABLE else "⚠️ LENTO (Sem aceleração C++)"
+            self.log(f"      🔌 Conectado ao Telegram! Status: {tg_status}")
+            self.log(f"      ℹ️ Usando {workers_count} conexões simultâneas (IPv4 Forçado)")
+
+            # Armazena estado para calular velocidade
+            self.last_update_time = time.time()
+            self.last_uploaded = 0
+            
+            def prog_func(current, total):
+                try:
+                    if total > 0:
+                        now = time.time()
+                        # Atualiza a cada 1.5 segundos para não travar a UI
+                        if now - self.last_update_time > 1.5:
+                            progress = current / total
+                            
+                            # Calcula velocidade
+                            delta_bytes = current - self.last_uploaded
+                            delta_time = now - self.last_update_time
+                            speed = delta_bytes / delta_time if delta_time > 0 else 0
+                            speed_str = f"{speed/1024/1024:.2f} MB/s"
+                            
+                            eta_seconds = (total - current) / speed if speed > 0 else 0
+                            eta_str = str(timedelta(seconds=int(eta_seconds)))
+
+                            self.update_status(f"Telegram: {int(progress*100)}% ({speed_str})", progress, eta_str)
+                            
+                            self.last_update_time = now
+                            self.last_uploaded = current
+                except Exception as e:
+                    print(f"DEBUG: Erro no callback de progresso: {e}")
+
+            video_msg = await app.send_video(
+                chat_id=chat_id,
+                video=file_path,
+                caption=f"🎬 {os.path.basename(file_path)}",
+                progress=prog_func
+            )
+            
+            # Verificacao de Tamanho
+            original_size = os.path.getsize(file_path)
+            sent_size = getattr(video_msg.video, 'file_size', 0) if video_msg and video_msg.video else 0
+            
+            if video_msg:
+                if sent_size > 0 and abs(sent_size - original_size) > 1024*1024: # Diferenca > 1MB
+                     self.log(f"      ⚠️ ALERTA: Tamanho diferente! Enviado: {sent_size/1024/1024:.1f}MB, Original: {original_size/1024/1024:.1f}MB")
+                self.log(f"      ✅ Sucesso Telegram! (Msg ID: {video_msg.id})")
+            else:
+                self.log("      ❌ Falha envio Telegram (Sem retorno).")
+
+        except Exception as e:
+            err_msg = str(e)
+            if "PEER_ID_INVALID" in err_msg.upper() or "Peer id invalid" in err_msg:
+                self.log(f"      ❌ Erro ID: O Bot não encontrou esse Chat ID ({chat_id}).")
+                self.log("      👉 Dica: Se for CANAL, o Bot precisa ser ADMIN lá.")
+                self.log("      👉 Dica: Se for PESSOAL, verifique seu ID no @userinfobot.")
+            else:
+                self.log(f"      ❌ Erro Async: {err_msg}")
+        finally:
+            if app:
+                try:
+                    if app.is_connected:
+                        await app.stop()
+                except: pass
+            
+            # Pequena pausa para garantir que tarefas background morram
+            await asyncio.sleep(1)
+
 if __name__ == "__main__":
-    app = VideoOptimizerApp()
-    app.mainloop()
+    try:
+        app = VideoOptimizerApp()
+        app.mainloop()
+    except Exception as e:
+        print(f"❌ Erro Fatal: {e}")
+        import traceback
+        traceback.print_exc()
+        input("Pressione Enter para sair...")
